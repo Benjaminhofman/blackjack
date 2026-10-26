@@ -169,6 +169,14 @@ select{min-height:42px;border:1px solid var(--line);background:var(--bg);color:v
 .extras p{margin:0;padding-top:10px;border-top:1px solid color-mix(in srgb,var(--v-fg) 24%,transparent);font-size:.92rem;max-width:62ch}
 .extras:empty{display:none}
 
+/* voix */
+.vstatus{font-size:.84rem;color:var(--muted)}
+.vstatus.on{color:var(--ink);font-weight:600}
+.vstatus.on::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#E5483A;margin-right:6px}
+.vheard{margin:12px 0 0;font-size:.92rem;min-height:2.9em;max-width:62ch}
+.vheard span{display:block}
+.vheard .ok{font-weight:600}
+
 @media (prefers-reduced-motion:no-preference){
   .key,.seg button,td{transition:background-color .12s,color .12s,border-color .12s,opacity .15s}
 }
@@ -186,6 +194,16 @@ select{min-height:42px;border:1px solid var(--line);background:var(--bg);color:v
 <main class="wrap">
   <div class="layout">
     <div class="inputs">
+      <section class="panel" aria-labelledby="h-voice">
+        <div class="panel-head"><h2 id="h-voice">Saisie vocale</h2><span class="vstatus" id="vStatus">Micro arrêté</span></div>
+        <div class="row-actions" style="margin-top:0">
+          <button type="button" class="btn primary" id="vBtn">Démarrer le micro</button>
+          <button type="button" class="btn" id="vUndo">Annuler la dernière carte</button>
+        </div>
+        <p class="vheard" id="vHeard" aria-live="polite"></p>
+        <p class="hint" id="vHelp">Dites d’abord à qui sont les cartes : « croupier cinq » (sa carte visible), puis « moi dix trois », puis « croupier dix six » (sa suite), puis « autres sept as roi » (les autres joueurs). Cartes : as, deux à dix, valet, dame, roi. Commandes : « stop » (ou « nouvelle manche ») pour passer à la manche suivante, « annuler », « nouveau sabot », « pause » pour arrêter le micro. Le démarrage du micro active le comptage.</p>
+      </section>
+
       <section class="panel" aria-labelledby="h-dealer">
         <div class="panel-head"><h2 id="h-dealer">Carte du croupier</h2></div>
         <div class="dealer-grid" id="dealerGrid"></div>
@@ -417,6 +435,28 @@ function indexEntry(res,rules){
   }
   return null;
 }
+var VWORD={as:'A',ace:'A',deux:'2',trois:'3',quatre:'4',cinq:'5',six:'6',sept:'7',cette:'7',set:'7',huit:'8',neuf:'9',dix:'10',dis:'10',valet:'V',dame:'D',roi:'R',figure:'10',buche:'10',tete:'10'};
+var VTARGET={croupier:'dealer',banquier:'dealer',banque:'dealer',moi:'me',joueur:'me',main:'me',autres:'others',autre:'others',table:'others',voisin:'others',voisins:'others'};
+function parseVoice(text){
+  var s=String(text).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]+/g,' ').trim();
+  if(!s)return [];
+  var tk=s.split(' '),ev=[];
+  for(var i=0;i<tk.length;i++){
+    var w=tk[i],nx=tk[i+1]||'';
+    if(((w==='nouvelle'||w==='prochaine'||w==='suivante')&&nx==='manche')||(w==='manche'&&(nx==='suivante'||nx==='prochaine'))){ev.push({t:'cmd',v:'newRound'});i++;continue;}
+    if(w==='nouveau'&&(nx==='sabot'||nx==='jeu')){ev.push({t:'cmd',v:'reset'});i++;continue;}
+    if(w==='annuler'||w==='annule'||w==='retire'||w==='retirer'||w==='corrige'){ev.push({t:'cmd',v:'undo'});continue;}
+    if(w==='stop'){ev.push({t:'cmd',v:'newRound'});continue;}
+    if(w==='pause'||w==='arrete'||w==='arreter'){ev.push({t:'cmd',v:'stop'});continue;}
+    if(VTARGET[w]){ev.push({t:'target',v:VTARGET[w]});continue;}
+    if(VWORD[w]){ev.push({t:'card',r:VWORD[w]});continue;}
+    if(/^[0-9]+$/.test(w)){
+      var m=w.match(/10|[1-9]/g)||[];
+      m.forEach(function(d){ev.push({t:'card',r:d==='1'?'A':d});});
+    }
+  }
+  return ev;
+}
 /* LOGIC-END */
 
 var DEALER=['2','3','4','5','6','7','8','9','10','A'];
@@ -431,6 +471,7 @@ var ACT={
 var state={dealer:'7',hand:['A','6'],dealerExtra:[],dealerPicked:true,h17:false,das:true,counting:false};
 var count={rc:0,seen:0,decks:6};
 var round={others:[]};
+var voice={target:null,hist:[]};
 try{
   var saved=JSON.parse(localStorage.getItem('bj-rules')||'null');
   if(saved){
@@ -455,7 +496,13 @@ function rcAll(){return count.rc+liveTags().reduce(function(a,b){return a+b;},0)
 function seenAll(){return count.seen+liveTags().length;}
 function decksLeft(){return Math.max(0.25,count.decks-seenAll()/52);}
 function trueCount(){return rcAll()/decksLeft();}
-function startRound(){state.hand=[];state.dealerExtra=[];round.others=[];state.dealerPicked=false;}
+function startRound(){state.hand=[];state.dealerExtra=[];round.others=[];state.dealerPicked=false;voice.hist=[];voice.target=null;}
+function commitRound(){
+  var t=liveTags();
+  count.rc+=t.reduce(function(a,b){return a+b;},0);count.seen+=t.length;
+  startRound();
+}
+function resetShoe(){count.rc=0;count.seen=0;startRound();}
 var ACTN={H:'tirer',S:'rester',D:'doubler',P:'séparer'};
 var ACTV={H:'on tire',S:'on reste',D:'on double',P:'on sépare'};
 function indexNote(ix,trig,tcv,base){
@@ -707,14 +754,99 @@ $('dClear').addEventListener('click',function(){
   if(state.counting)state.dealerExtra.forEach(function(c){round.others.push(tag(c));});
   state.dealerExtra=[];render();
 });
-$('newRound').addEventListener('click',function(){
-  var t=liveTags();
-  count.rc+=t.reduce(function(a,b){return a+b;},0);count.seen+=t.length;
-  startRound();render();
-});
+$('newRound').addEventListener('click',function(){commitRound();render();});
 $('countUndo').addEventListener('click',function(){round.others.pop();render();});
-$('countReset').addEventListener('click',function(){count.rc=0;count.seen=0;startRound();render();});
+$('countReset').addEventListener('click',function(){resetShoe();render();});
 $('decks').addEventListener('change',function(){count.decks=Number($('decks').value);saveRules();render();});
+
+/* saisie vocale (Web Speech API, navigateur Chrome ou Edge recommandé) */
+var SR=window.SpeechRecognition||window.webkitSpeechRecognition,rec=null,listening=false;
+function vStatus(txt,on){var s=$('vStatus');s.textContent=txt;s.className='vstatus'+(on?' on':'');}
+function labelOf(t){return t==='dealer'?'Croupier':(t==='me'?'Moi':'Autres');}
+function undoLast(){
+  var h=voice.hist.pop();if(!h)return false;
+  if(h.k==='up'){state.dealer=h.dealer;state.dealerPicked=false;}
+  else if(h.k==='dx')state.dealerExtra.pop();
+  else if(h.k==='hand')state.hand.pop();
+  else if(h.k==='ot')round.others.pop();
+  return true;
+}
+function showHeard(raw,out){
+  var h='<span>Entendu : « '+String(raw).replace(/</g,'&lt;')+' »</span>';
+  var txt=out.map(function(o){return o.c.length?o.l+' '+o.c.join(' '):o.l;}).join(' · ');
+  h+='<span class="ok">'+(txt?'Compris : '+txt:'Rien de compris, répétez.')+'</span>';
+  $('vHeard').innerHTML=h;
+}
+function handleSpeech(raw){
+  var evs=parseVoice(raw),out=[],ctx=null;
+  evs.forEach(function(ev){
+    if(ev.t==='target'){voice.target=ev.v;ctx={l:labelOf(ev.v),c:[]};out.push(ctx);return;}
+    if(ev.t==='card'){
+      if(!voice.target){out.push({l:'carte '+ev.r+' ignorée (dites d’abord croupier, moi ou autres)',c:[]});return;}
+      if(!ctx){ctx={l:labelOf(voice.target),c:[]};out.push(ctx);}
+      var r=ev.r;
+      if(voice.target==='dealer'){
+        if(!state.dealerPicked){
+          voice.hist.push({k:'up',dealer:state.dealer});
+          state.dealer=(r==='V'||r==='D'||r==='R')?'10':r;state.dealerPicked=true;
+        }else if(state.dealerExtra.length<9){state.dealerExtra.push(r);voice.hist.push({k:'dx'});}
+      }else if(voice.target==='me'){
+        if(state.hand.length<10){state.hand.push(r);voice.hist.push({k:'hand'});}
+      }else{round.others.push(tag(r));voice.hist.push({k:'ot'});}
+      ctx.c.push(r);return;
+    }
+    ctx=null;
+    if(ev.v==='newRound'){commitRound();out.push({l:'nouvelle manche',c:[]});}
+    else if(ev.v==='reset'){resetShoe();out.push({l:'nouveau sabot',c:[]});}
+    else if(ev.v==='undo'){out.push({l:undoLast()?'dernière carte annulée':'rien à annuler',c:[]});}
+    else if(ev.v==='stop'){stopVoice();out.push({l:'micro arrêté',c:[]});}
+  });
+  showHeard(raw,out);
+  render();
+}
+function stopVoice(){
+  listening=false;
+  try{if(rec)rec.stop();}catch(e){}
+  vStatus('Micro arrêté',false);
+  $('vBtn').textContent='Démarrer le micro';
+}
+function startVoice(){
+  if(!SR)return;
+  if(!state.counting){state.counting=true;saveRules();startRound();render();}
+  rec=new SR();
+  rec.lang='fr-FR';rec.continuous=true;rec.interimResults=false;rec.maxAlternatives=1;
+  rec.onresult=function(e){
+    for(var i=e.resultIndex;i<e.results.length;i++){
+      if(e.results[i].isFinal)handleSpeech(e.results[i][0].transcript);
+    }
+  };
+  rec.onerror=function(e){
+    var m={
+      'not-allowed':'Accès au micro refusé ou bloqué ici. Ouvrez la page hébergée sur votre site (https) et autorisez le micro.',
+      'service-not-allowed':'Reconnaissance vocale bloquée ici. Ouvrez la page hébergée sur votre site (https).',
+      'audio-capture':'Aucun micro détecté.',
+      'network':'Reconnaissance vocale indisponible (réseau).'
+    };
+    if(m[e.error]){stopVoice();vStatus(m[e.error],false);}
+  };
+  rec.onend=function(){
+    if(listening){try{rec.start();}catch(e){}}
+  };
+  listening=true;
+  try{rec.start();vStatus('À l’écoute…',true);$('vBtn').textContent='Arrêter le micro';}
+  catch(e){listening=false;vStatus('Impossible de démarrer le micro.',false);}
+}
+$('vBtn').addEventListener('click',function(){if(listening)stopVoice();else startVoice();});
+$('vUndo').addEventListener('click',function(){
+  var ok=undoLast();
+  $('vHeard').innerHTML='<span class="ok">'+(ok?'Dernière carte annulée.':'Rien à annuler.')+'</span>';
+  render();
+});
+if(!SR){
+  $('vBtn').disabled=true;
+  vStatus('Non pris en charge par ce navigateur',false);
+  $('vHelp').textContent='La reconnaissance vocale n’est pas disponible ici. Utilisez Chrome ou Edge sur ordinateur ou Android.';
+}
 
 render();
 })();
